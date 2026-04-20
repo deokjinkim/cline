@@ -2413,13 +2413,27 @@ export class Task {
 			// No explicit UI message here, error message will be in ExtensionState.
 		}
 
-		// Determine if we should compact context window
-		// Note: We delay context loading until we know if we're compacting (performance optimization)
-		const useCompactPrompt = customPrompt === "compact" && isLocalModel(this.getCurrentProviderInfo())
-		let shouldCompact = false
-		const useAutoCondense = this.stateManager.getGlobalSettingsKey("useAutoCondense")
+			// Determine if we should compact context window
+			// Note: We delay context loading until we know if we're compacting (performance optimization)
+			const useCompactPrompt = customPrompt === "compact" && isLocalModel(this.getCurrentProviderInfo())
+			let shouldCompact = false
+			const useAutoCondense = this.stateManager.getGlobalSettingsKey("useAutoCondense")
+			let proactiveNeedToTruncate: boolean | null = null
 
-		if (useAutoCondense && isNextGenModelFamily(this.api.getModel().id)) {
+			// Proactively optimize file-read-heavy context regardless of auto-condense setting.
+			// This can lower token usage even when summarize_task is disabled by trimming redundant
+			// file read context before the next API request is built.
+			if (!this.taskState.currentlySummarizing) {
+				proactiveNeedToTruncate = await this.contextManager.attemptFileReadOptimization(
+					this.messageStateHandler.getApiConversationHistory(),
+					this.taskState.conversationHistoryDeletedRange,
+					this.messageStateHandler.getClineMessages(),
+					previousApiReqIndex,
+					await ensureTaskDirectoryExists(this.taskId),
+				)
+			}
+
+			if (useAutoCondense && isNextGenModelFamily(this.api.getModel().id)) {
 			// When we initially trigger context cleanup, we increase the context window size, so we need state `currentlySummarizing`
 			// to track if we've already started the context summarization flow. After summarizing, we increment
 			// conversationHistoryDeletedRange to mask out the summarization-trigger user & assistant response messages
@@ -2458,18 +2472,20 @@ export class Task {
 					}
 				}
 
-				// Determine whether we can save enough tokens from context rewriting to skip auto-compact
-				if (shouldCompact) {
-					shouldCompact = await this.contextManager.attemptFileReadOptimization(
-						this.messageStateHandler.getApiConversationHistory(),
-						this.taskState.conversationHistoryDeletedRange,
-						this.messageStateHandler.getClineMessages(),
-						previousApiReqIndex,
-						await ensureTaskDirectoryExists(this.taskId),
-					)
+					// Determine whether we can save enough tokens from context rewriting to skip auto-compact
+					if (shouldCompact) {
+						shouldCompact =
+							proactiveNeedToTruncate ??
+							(await this.contextManager.attemptFileReadOptimization(
+								this.messageStateHandler.getApiConversationHistory(),
+								this.taskState.conversationHistoryDeletedRange,
+								this.messageStateHandler.getClineMessages(),
+								previousApiReqIndex,
+								await ensureTaskDirectoryExists(this.taskId),
+							))
+					}
 				}
 			}
-		}
 
 		// NOW load context based on compaction decision
 		// This optimization avoids expensive context loading when using summarize_task
